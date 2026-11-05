@@ -65,6 +65,21 @@ export async function run(): Promise<void> {
       }
     }
 
+    // Check for a previous forwardport before doing any writes. The stable
+    // branch name also lets a replay detect a branch left by an interrupted run.
+    const existingPR = await checkExistingForwardportPR(
+      octokit,
+      context,
+      prNumber
+    );
+
+    if (existingPR) {
+      core.info(existingPR.number
+        ? `Forwardport PR #${existingPR.number} already exists for PR #${prNumber}, skipping`
+        : `Forwardport branch ${existingPR.head.ref} already exists for PR #${prNumber}, skipping`);
+      return;
+    }
+
     // Get changed files from the PR
     const { data: files } = await octokit.rest.pulls.listFiles({
       ...context.repo,
@@ -82,24 +97,24 @@ export async function run(): Promise<void> {
       return;
     }
 
-    // Check if a forwardport PR already exists for this PR
-    const existingPR = await checkExistingForwardportPR(
-      octokit,
-      context,
-      prNumber
-    );
-
-    if (existingPR) {
-      core.info(`Forwardport PR #${existingPR.number} already exists for PR #${prNumber}, skipping`);
-      return;
-    }
-
     // Create a branch for this forwardport
-    const timestamp = new Date().getTime();
-    const branchName = `forwardport/to-main-${prNumber}-${timestamp}`;
+    const branchName = `forwardport/to-main-${prNumber}`;
 
     // Create the branch
-    await createBranch(octokit, context, branchName);
+    try {
+      await createBranch(octokit, context, branchName);
+    } catch (error: any) {
+      // If another delivery created the deterministic ref after our check,
+      // stop before writing files or opening a duplicate PR.
+      if (error.status === 422) {
+        const existingPort = await checkExistingForwardportPR(octokit, context, prNumber);
+        if (existingPort) {
+          core.info(`Forwardport already exists for PR #${prNumber}; concurrent delivery skipped`);
+          return;
+        }
+      }
+      throw error;
+    }
 
     // Process files and get stats
     const stats = await forwardportFiles(
@@ -362,35 +377,62 @@ export async function checkExistingForwardportPR(
   context: any,
   originalPRNumber: number
 ): Promise<any | null> {
-  try {
-    // Search for both open and closed PRs that mention the original PR number
-    const states: Array<'open' | 'closed'> = ['open', 'closed'];
+  const targetBranch = context.payload.repository.default_branch;
+  const legacyBranchPrefix = `forwardport/to-main-${originalPRNumber}-`;
 
-    for (const state of states) {
+  // Prior releases used a timestamp suffix. The source PR and target branch
+  // are encoded in this prefix, so detect those abandoned branches as well.
+  const { data: branches } = await octokit.rest.git.listMatchingRefs({
+    ...context.repo,
+    ref: `heads/${legacyBranchPrefix}`
+  });
+  const existingBranch = branches.find((branch: any) => branch.ref.startsWith(`refs/heads/${legacyBranchPrefix}`));
+  if (existingBranch) {
+    return { head: { ref: existingBranch.ref.replace('refs/heads/', '') } };
+  }
+
+  const states: Array<'open' | 'closed'> = ['open', 'closed'];
+  for (const state of states) {
+    let page = 1;
+    while (page <= 100) {
       const { data: prs } = await octokit.rest.pulls.list({
         ...context.repo,
-        state: state,
+        state,
         sort: 'created',
         direction: 'desc',
-        per_page: 100
+        per_page: 100,
+        page
       });
 
-      // Look for PRs with the forwardport title format
       for (const pr of prs) {
-        const matchesTitle = pr.title.includes('[forwardport]') && pr.title.includes(`(#${originalPRNumber})`);
-        const referencesOriginalPR = pr.body && pr.body.includes(`Original PR: #${originalPRNumber}`);
-
-        if (matchesTitle || referencesOriginalPR) {
+        const targetsMain = pr.base?.ref === targetBranch;
+        const titleMatches = pr.title?.startsWith('[forwardport] ') && pr.title.endsWith(`(#${originalPRNumber})`);
+        const bodyMatches = new RegExp(`(?:^|\\n)Original PR: #${originalPRNumber}(?:\\n|$)`).test(pr.body || '');
+        const branchMatches = pr.head?.ref?.startsWith(legacyBranchPrefix);
+        if (targetsMain && (titleMatches || bodyMatches || branchMatches)) {
           core.info(`Found existing ${state} forwardport PR #${pr.number} from PR #${originalPRNumber}`);
           return pr;
         }
       }
-    }
 
-    return null;
+      if (prs.length < 100) break;
+      page++;
+    }
+    if (page > 100) throw new Error(`Could not finish checking ${state} forwardport PRs`);
+  }
+
+  // A deterministic ref closes the check-then-create race and makes a replay
+  // after branch creation visible even if the run stopped before opening a PR.
+  const stableBranch = `forwardport/to-main-${originalPRNumber}`;
+  try {
+    const { data: ref } = await octokit.rest.git.getRef({
+      ...context.repo,
+      ref: `heads/${stableBranch}`
+    });
+    return { head: { ref: ref.ref.replace('refs/heads/', '') } };
   } catch (error: any) {
-    core.warning(`Error checking for existing forwardport PRs: ${error.message}`);
-    return null;
+    if (error.status === 404) return null;
+    throw error;
   }
 }
 

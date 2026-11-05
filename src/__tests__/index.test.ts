@@ -29,10 +29,15 @@ describe('Docs Forwardport Action Tests', () => {
                 {
                   number: 456,
                   title: '[forwardport] Original PR Title (#123)',
-                  body: 'Original PR: #123'
+                  body: 'Original PR: #123',
+                  base: { ref: 'main' }
                 }
               ]
             })
+          },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
           }
         }
       };
@@ -41,7 +46,8 @@ describe('Docs Forwardport Action Tests', () => {
         repo: {
           owner: 'loft-sh',
           repo: 'vcluster-docs'
-        }
+        },
+        payload: { repository: { default_branch: 'main' } }
       };
 
       const result = await index.checkExistingForwardportPR(
@@ -66,10 +72,16 @@ describe('Docs Forwardport Action Tests', () => {
                     number: 456,
                     title: '[forwardport] Some title (#123)',
                     body: 'Original PR: #123',
-                    state: 'closed'
+                    state: 'closed',
+                    merged_at: '2026-11-05T10:00:00Z',
+                    base: { ref: 'main' }
                   }
                 ]
               })
+          },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
           }
         }
       };
@@ -78,7 +90,8 @@ describe('Docs Forwardport Action Tests', () => {
         repo: {
           owner: 'loft-sh',
           repo: 'vcluster-docs'
-        }
+        },
+        payload: { repository: { default_branch: 'main' } }
       };
 
       const result = await index.checkExistingForwardportPR(
@@ -97,6 +110,10 @@ describe('Docs Forwardport Action Tests', () => {
         rest: {
           pulls: {
             list: jest.fn().mockResolvedValue({ data: [] })
+          },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
           }
         }
       };
@@ -105,7 +122,8 @@ describe('Docs Forwardport Action Tests', () => {
         repo: {
           owner: 'loft-sh',
           repo: 'vcluster-docs'
-        }
+        },
+        payload: { repository: { default_branch: 'main' } }
       };
 
       const result = await index.checkExistingForwardportPR(
@@ -115,6 +133,112 @@ describe('Docs Forwardport Action Tests', () => {
       );
 
       expect(result).toBeNull();
+    });
+
+    it('skips a replay when an existing forwardport branch was created', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { list: jest.fn().mockResolvedValue({ data: [] }) },
+          git: {
+            listMatchingRefs: jest.fn()
+              .mockResolvedValueOnce({ data: [] })
+              .mockResolvedValueOnce({ data: [{ ref: 'refs/heads/forwardport/to-main-123-1730800000000' }] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
+          }
+        }
+      };
+      const context = {
+        repo: { owner: 'loft-sh', repo: 'vcluster-docs' },
+        payload: { repository: { default_branch: 'main' } }
+      };
+
+      const firstDelivery = await index.checkExistingForwardportPR(mockOctokit, context, 123);
+      const replay = await index.checkExistingForwardportPR(mockOctokit, context, 123);
+
+      expect(firstDelivery).toBeNull();
+      expect(replay.head.ref).toBe('forwardport/to-main-123-1730800000000');
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips when a merged forwardport PR exists', async () => {
+      const mergedPR = {
+        number: 456,
+        title: '[forwardport] Original PR Title (#123)',
+        body: 'Original PR: #123',
+        state: 'closed',
+        merged_at: '2026-11-05T10:00:00Z',
+        base: { ref: 'main' }
+      };
+      const mockOctokit = {
+        rest: {
+          pulls: { list: jest.fn()
+            .mockResolvedValueOnce({ data: [] })
+            .mockResolvedValueOnce({ data: [mergedPR] }) },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
+          }
+        }
+      };
+      const context = {
+        repo: { owner: 'loft-sh', repo: 'vcluster-docs' },
+        payload: { repository: { default_branch: 'main' } }
+      };
+
+      const result = await index.checkExistingForwardportPR(mockOctokit, context, 123);
+
+      expect(result.number).toBe(456);
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledTimes(2);
+    });
+
+    it('finds a forwardport PR outside the newest 100 PRs', async () => {
+      const olderPR = {
+        number: 456,
+        title: '[forwardport] Original PR Title (#123)',
+        body: 'Original PR: #123',
+        base: { ref: 'main' }
+      };
+      const mockOctokit = {
+        rest: {
+          pulls: { list: jest.fn()
+            .mockResolvedValueOnce({ data: Array.from({ length: 100 }, (_, i) => ({ number: i + 1, title: 'unrelated', body: '' })) })
+            .mockResolvedValueOnce({ data: [olderPR] }) },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
+          }
+        }
+      };
+      const context = {
+        repo: { owner: 'loft-sh', repo: 'vcluster-docs' },
+        payload: { repository: { default_branch: 'main' } }
+      };
+
+      const result = await index.checkExistingForwardportPR(mockOctokit, context, 123);
+
+      expect(result.number).toBe(456);
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.pulls.list.mock.calls[1][0].page).toBe(2);
+    });
+
+    it('fails closed when listing existing forwardports fails', async () => {
+      const apiError = new Error('API unavailable');
+      const mockOctokit = {
+        rest: {
+          pulls: { list: jest.fn().mockRejectedValue(apiError) },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockRejectedValue({ status: 404 })
+          }
+        }
+      };
+      const context = {
+        repo: { owner: 'loft-sh', repo: 'vcluster-docs' },
+        payload: { repository: { default_branch: 'main' } }
+      };
+
+      await expect(index.checkExistingForwardportPR(mockOctokit, context, 123)).rejects.toBe(apiError);
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
     });
   });
 
@@ -518,7 +642,11 @@ describe('Docs Forwardport Action Tests', () => {
             createOrUpdateFileContents: jest.fn().mockResolvedValue({})
           },
           git: {
-            getRef: jest.fn().mockResolvedValue({ data: { object: { sha: 'main-sha' } } }),
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockImplementation(({ ref }: any) => {
+              if (ref === 'heads/forwardport/to-main-7') return Promise.reject({ status: 404 });
+              return Promise.resolve({ data: { ref, object: { sha: 'main-sha' } } });
+            }),
             createRef: jest.fn().mockResolvedValue({})
           },
           issues: {
@@ -549,6 +677,71 @@ describe('Docs Forwardport Action Tests', () => {
       expect(mockCore.setFailed).toHaveBeenCalledWith(
         expect.stringContaining('Forwardport failed for 1 file(s); no pull request was created')
       );
+    });
+
+    it('does not write a second forwardport when the same signal is replayed', async () => {
+      let branchCreated = false;
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            listFiles: jest.fn().mockResolvedValue({
+              data: [{ filename: 'vcluster_versioned_docs/version-0.37.0/guide.mdx', status: 'added' }]
+            }),
+            list: jest.fn().mockResolvedValue({ data: [] }),
+            create: jest.fn().mockResolvedValue({ data: { number: 456 } })
+          },
+          repos: {
+            get: jest.fn().mockResolvedValue({ data: { default_branch: 'main' } }),
+            getContent: jest.fn().mockImplementation(({ path }: any) => {
+              if (path === 'vcluster_versioned_docs/version-0.37.0/guide.mdx') {
+                return Promise.resolve({ data: { content: Buffer.from('forwardport').toString('base64'), sha: 'source' } });
+              }
+              if (path === 'vcluster/guide.mdx') return Promise.reject({ status: 404 });
+              return Promise.resolve({ data: [] });
+            }),
+            createOrUpdateFileContents: jest.fn().mockResolvedValue({})
+          },
+          git: {
+            listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
+            getRef: jest.fn().mockImplementation(({ ref }: any) => {
+              if (ref === 'heads/forwardport/to-main-7') {
+                return branchCreated
+                  ? Promise.resolve({ data: { ref: 'refs/heads/forwardport/to-main-7' } })
+                  : Promise.reject({ status: 404 });
+              }
+              return Promise.resolve({ data: { object: { sha: 'main-sha' } } });
+            }),
+            createRef: jest.fn().mockImplementation(() => {
+              branchCreated = true;
+              return Promise.resolve({});
+            })
+          },
+          issues: { addLabels: jest.fn().mockResolvedValue({}) }
+        }
+      };
+      mockGithub.getOctokit = jest.fn().mockReturnValue(mockOctokit);
+      mockGithub.context = {
+        payload: {
+          action: 'closed',
+          pull_request: {
+            number: 7,
+            merged: true,
+            labels: [{ name: 'forwardport-main' }],
+            head: { sha: 'head-sha' },
+            title: 'Fix guide'
+          },
+          repository: { default_branch: 'main' }
+        },
+        repo: { owner: 'test', repo: 'test' }
+      };
+
+      await index.run();
+      await index.run();
+
+      expect(mockOctokit.rest.git.createRef).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.pulls.create).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(1);
     });
   });
 });

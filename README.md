@@ -40,6 +40,8 @@ jobs:
 
 A file with no matching place in the main folder isn't created. That covers a modified or renamed file that doesn't exist at the same path in the main folder, and an added file whose folder the main folder lacks. After a docs restructure those pages live at different paths, and copying them by path would bring them back as duplicates. The forwardport PR lists them under "Manual review needed". When nothing else was copied, the action comments the list on the original PR instead. Retries update that comment instead of posting a new one.
 
+Before writing, the action checks for an existing forwardport branch or PR from the same source PR to the default branch. This makes signal replays skip ports that are already open, merged, or left on a branch after an interrupted run. API errors during this check fail the action so a retry cannot create a duplicate.
+
 If any file fails to process, for example because a lookup returns an error other than 404, the run fails and no forwardport PR is opened. Fix the cause and rerun the job.
 
 ## Folder Mapping
