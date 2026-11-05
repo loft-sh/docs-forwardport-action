@@ -38,6 +38,10 @@ jobs:
 3. Mapping: Strips version folder prefix to map to main folder path
 4. PR Creation: Creates a new PR with forwardported changes after merge
 
+A file with no matching place in the main folder isn't created. That covers a modified or renamed file that doesn't exist at the same path in the main folder, and an added file whose folder the main folder lacks. After a docs restructure those pages live at different paths, and copying them by path would bring them back as duplicates. The forwardport PR lists them under "Manual review needed". When nothing else was copied, the action comments the list on the original PR instead. Retries update that comment instead of posting a new one.
+
+If any file fails to process, for example because a lookup returns an error other than 404, the run fails and no forwardport PR is opened. Fix the cause and rerun the job.
+
 ## Folder Mapping
 
 | Source | Target |
