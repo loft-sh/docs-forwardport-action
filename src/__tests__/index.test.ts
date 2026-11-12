@@ -135,31 +135,6 @@ describe('Docs Forwardport Action Tests', () => {
       expect(result).toBeNull();
     });
 
-    it('skips a replay when an existing forwardport branch was created', async () => {
-      const mockOctokit = {
-        rest: {
-          pulls: { list: jest.fn().mockResolvedValue({ data: [] }) },
-          git: {
-            listMatchingRefs: jest.fn()
-              .mockResolvedValueOnce({ data: [] })
-              .mockResolvedValueOnce({ data: [{ ref: 'refs/heads/forwardport/to-main-123-1730800000000' }] }),
-            getRef: jest.fn().mockRejectedValue({ status: 404 })
-          }
-        }
-      };
-      const context = {
-        repo: { owner: 'loft-sh', repo: 'vcluster-docs' },
-        payload: { repository: { default_branch: 'main' } }
-      };
-
-      const firstDelivery = await index.checkExistingForwardportPR(mockOctokit, context, 123);
-      const replay = await index.checkExistingForwardportPR(mockOctokit, context, 123);
-
-      expect(firstDelivery).toBeNull();
-      expect(replay.head.ref).toBe('forwardport/to-main-123-1730800000000');
-      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledTimes(2);
-    });
-
     it('skips when a merged forwardport PR exists', async () => {
       const mergedPR = {
         number: 456,
@@ -189,6 +164,16 @@ describe('Docs Forwardport Action Tests', () => {
 
       expect(result.number).toBe(456);
       expect(mockOctokit.rest.pulls.list).toHaveBeenCalledTimes(2);
+    });
+
+    it('scans beyond 100 full pages of unrelated closed PRs', async () => {
+      const list = jest.fn().mockImplementation(({ state, page }: any) => Promise.resolve({
+        data: state === 'closed' && page <= 100
+          ? Array.from({ length: 100 }, () => ({ title: 'unrelated' })) : []
+      }));
+      const context = { repo: { owner: 'test', repo: 'test' }, payload: { repository: { default_branch: 'main' } } };
+      expect(await index.checkExistingForwardportPR({ rest: { pulls: { list } } }, context, 123)).toBeNull();
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ state: 'closed', page: 101 }));
     });
 
     it('finds a forwardport PR outside the newest 100 PRs', async () => {
@@ -238,7 +223,6 @@ describe('Docs Forwardport Action Tests', () => {
       };
 
       await expect(index.checkExistingForwardportPR(mockOctokit, context, 123)).rejects.toBe(apiError);
-      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
     });
   });
 
@@ -679,16 +663,17 @@ describe('Docs Forwardport Action Tests', () => {
       );
     });
 
-    it('does not write a second forwardport when the same signal is replayed', async () => {
+    it('resumes a failed write and skips a replay after the PR exists', async () => {
       let branchCreated = false;
+      let prCreated = false;
       const mockOctokit = {
         rest: {
           pulls: {
             listFiles: jest.fn().mockResolvedValue({
               data: [{ filename: 'vcluster_versioned_docs/version-0.37.0/guide.mdx', status: 'added' }]
             }),
-            list: jest.fn().mockResolvedValue({ data: [] }),
-            create: jest.fn().mockResolvedValue({ data: { number: 456 } })
+            list: jest.fn().mockImplementation(() => Promise.resolve({ data: prCreated ? [{ number: 456, title: '[forwardport] Fix guide (#7)', base: { ref: 'main' } }] : [] })),
+            create: jest.fn().mockImplementation(() => { prCreated = true; return Promise.resolve({ data: { number: 456 } }); })
           },
           repos: {
             get: jest.fn().mockResolvedValue({ data: { default_branch: 'main' } }),
@@ -699,7 +684,7 @@ describe('Docs Forwardport Action Tests', () => {
               if (path === 'vcluster/guide.mdx') return Promise.reject({ status: 404 });
               return Promise.resolve({ data: [] });
             }),
-            createOrUpdateFileContents: jest.fn().mockResolvedValue({})
+            createOrUpdateFileContents: jest.fn().mockRejectedValueOnce(new Error('transient write failure')).mockResolvedValue({})
           },
           git: {
             listMatchingRefs: jest.fn().mockResolvedValue({ data: [] }),
@@ -736,12 +721,14 @@ describe('Docs Forwardport Action Tests', () => {
       };
 
       await index.run();
+      expect(mockCore.setFailed).toHaveBeenCalled();
+      await index.run();
       await index.run();
 
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalledTimes(1);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalledTimes(1);
-      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(2);
     });
   });
 });
